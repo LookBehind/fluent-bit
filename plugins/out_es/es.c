@@ -37,6 +37,10 @@
 #include "es_bulk.h"
 #include "murmur3.h"
 
+#define ERROR_CHK_SUCCESS 0
+#define ERROR_CHK_RETRYABLE_ERRORS 1
+#define ERROR_CHK_NONRETRYABLE_ERRORS 2
+
 struct flb_output_plugin out_es_plugin;
 
 static int es_pack_array_content(msgpack_packer *tmp_pck,
@@ -638,9 +642,9 @@ static int cb_es_init(struct flb_output_instance *ins,
 static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
                                      struct flb_http_client *c)
 {
-    int i, j, k;
+    int i, j, k, m;
     int ret;
-    int check = FLB_FALSE;
+    int check = ERROR_CHK_SUCCESS;
     int root_type;
     char *out_buf;
     size_t off = 0;
@@ -664,17 +668,17 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
     if (ret == -1) {
         /* Is this an incomplete HTTP Request ? */
         if (c->resp.payload_size <= 0) {
-            return FLB_TRUE;
+            return ERROR_CHK_RETRYABLE_ERRORS;
         }
 
         /* Lookup error field */
         if (strstr(c->resp.payload, "\"errors\":false,\"items\":[")) {
-            return FLB_FALSE;
+            return ERROR_CHK_SUCCESS;
         }
 
         flb_plg_error(ctx->ins, "could not pack/validate JSON response\n%s",
                       c->resp.payload);
-        return FLB_TRUE;
+        return ERROR_CHK_RETRYABLE_ERRORS;
     }
 
     /* Lookup error field */
@@ -683,14 +687,14 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
     if (ret != MSGPACK_UNPACK_SUCCESS) {
         flb_plg_error(ctx->ins, "Cannot unpack response to find error\n%s",
                       c->resp.payload);
-        return FLB_TRUE;
+        return ERROR_CHK_RETRYABLE_ERRORS;
     }
 
     root = result.data;
     if (root.type != MSGPACK_OBJECT_MAP) {
         flb_plg_error(ctx->ins, "unexpected payload type=%i",
                       root.type);
-        check = FLB_TRUE;
+        check = ERROR_CHK_RETRYABLE_ERRORS;
         goto done;
     }
 
@@ -699,7 +703,7 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
         if (key.type != MSGPACK_OBJECT_STR) {
             flb_plg_error(ctx->ins, "unexpected key type=%i",
                           key.type);
-            check = FLB_TRUE;
+            check = ERROR_CHK_RETRYABLE_ERRORS;
             goto done;
         }
 
@@ -708,14 +712,14 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
             if (val.type != MSGPACK_OBJECT_BOOLEAN) {
                 flb_plg_error(ctx->ins, "unexpected 'error' value type=%i",
                               val.type);
-                check = FLB_TRUE;
+                check = ERROR_CHK_RETRYABLE_ERRORS;
                 goto done;
             }
 
             /* If error == false, we are OK (no errors = FLB_FALSE) */
             if (!val.via.boolean) {
                 /* no errors */
-                check = FLB_FALSE;
+                check = ERROR_CHK_SUCCESS;
                 goto done;
             }
         }
@@ -724,7 +728,7 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
             if (val.type != MSGPACK_OBJECT_ARRAY) {
                 flb_plg_error(ctx->ins, "unexpected 'items' value type=%i",
                               val.type);
-                check = FLB_TRUE;
+                check = ERROR_CHK_RETRYABLE_ERRORS;
                 goto done;
             }
 
@@ -733,14 +737,14 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
                 if (item.type != MSGPACK_OBJECT_MAP) {
                     flb_plg_error(ctx->ins, "unexpected 'item' outer value type=%i",
                                   item.type);
-                    check = FLB_TRUE;
+                    check = ERROR_CHK_RETRYABLE_ERRORS;
                     goto done;
                 }
 
                 if (item.via.map.size != 1) {
                     flb_plg_error(ctx->ins, "unexpected 'item' size=%i",
                                   item.via.map.size);
-                    check = FLB_TRUE;
+                    check = ERROR_CHK_RETRYABLE_ERRORS;
                     goto done;
                 }
 
@@ -748,7 +752,7 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
                 if (item.type != MSGPACK_OBJECT_MAP) {
                     flb_plg_error(ctx->ins, "unexpected 'item' inner value type=%i",
                                   item.type);
-                    check = FLB_TRUE;
+                    check = ERROR_CHK_RETRYABLE_ERRORS;
                     goto done;
                 }
 
@@ -757,7 +761,7 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
                     if (item_key.type != MSGPACK_OBJECT_STR) {
                         flb_plg_error(ctx->ins, "unexpected key type=%i",
                                       item_key.type);
-                        check = FLB_TRUE;
+                        check = ERROR_CHK_RETRYABLE_ERRORS;
                         goto done;
                     }
 
@@ -767,13 +771,23 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
                         if (item_val.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
                             flb_plg_error(ctx->ins, "unexpected 'status' value type=%i",
                                           item_val.type);
-                            check = FLB_TRUE;
+                            check = ERROR_CHK_RETRYABLE_ERRORS;
                             goto done;
                         }
-                        /* Check for errors other than version conflict (document already exists) */
-                        if (item_val.via.i64 != 409) {
-                            check = FLB_TRUE;
-                            goto done;
+                        /* Check for errors other than ignored ones (i.e. version conflict (document already exists), etc) */
+                        for (m = 0; m < ctx->i_skip_retry_on_error_count; m++)
+                        {
+                            if (item_val.via.i64 == ctx->i_skip_retry_on_error_statuses[m])
+                            {
+                                check = ERROR_CHK_NONRETRYABLE_ERRORS;
+                                goto done;
+                            }
+
+                            if (m == ctx->i_skip_retry_on_error_count - 1)
+                            {
+                                check = ERROR_CHK_RETRYABLE_ERRORS;
+                                goto done;
+                            }
                         }
                     }
                 }
@@ -913,7 +927,7 @@ static void cb_es_flush(struct flb_event_chunk *event_chunk,
              * and lookup the 'error' field.
              */
             ret = elasticsearch_error_check(ctx, c);
-            if (ret == FLB_TRUE) {
+            if (ret != ERROR_CHK_SUCCESS) {
                 /* we got an error */
                 if (ctx->trace_error) {
                     /*
@@ -921,23 +935,14 @@ static void cb_es_flush(struct flb_event_chunk *event_chunk,
                      * response from Elasticsearch explaining the problem.
                      * Trace_Output can be used to see the request. 
                      */
-                    if (pack_size < 4000) {
-                        flb_plg_debug(ctx->ins, "error caused by: Input\n%.*s\n",
-                                      (int) pack_size, pack);
-                    }
-                    if (c->resp.payload_size < 4000) {
-                        flb_plg_error(ctx->ins, "error: Output\n%s",
-                                      c->resp.payload);
-                    } else {
-                        /*
-                        * We must use fwrite since the flb_log functions
-                        * will truncate data at 4KB
-                        */
-                        fwrite(c->resp.payload, 1, c->resp.payload_size, stderr);
-                        fflush(stderr);
-                    }
+                    
+                    flb_plg_error(ctx->ins, "error: ElasticBulkApiRequest=%.*s ElasticBulkApiResponse=%s", (int)pack_size, pack, c->resp.payload);
                 }
-                goto retry;
+
+                if (ret == ERROR_CHK_RETRYABLE_ERRORS) {
+                    goto retry;
+                }
+                // We are left only with NON_RETRYABLE errors, so skip this batch
             }
             else {
                 flb_plg_debug(ctx->ins, "Elasticsearch response\n%s",
@@ -1146,6 +1151,13 @@ static struct flb_config_map config_map[] = {
      0, FLB_TRUE, offsetof(struct flb_elasticsearch, generate_id),
      "When enabled, generate _id for outgoing records. This prevents duplicate "
      "records when retrying ES"
+    },
+    {
+     FLB_CONFIG_MAP_STR, "skip_retry_on_error_statuses", "409",
+     0, FLB_TRUE, offsetof(struct flb_elasticsearch, skip_retry_on_error_statuses),
+     "When specified - skips retry if all items in bulk api response have "
+     "statuses (response.items[].op.status) specified in this property (ex. 409 document already exists). "
+     "Multiple statuses should be separated with ','."
     },
     {
      FLB_CONFIG_MAP_STR, "write_operation", "create",

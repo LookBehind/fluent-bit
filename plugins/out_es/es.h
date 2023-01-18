@@ -86,6 +86,10 @@ struct flb_elasticsearch {
     int generate_id;
     int current_time_index;
 
+    flb_sds_t skip_retry_on_error_statuses;
+    int i_skip_retry_on_error_statuses[16];
+    int i_skip_retry_on_error_count;
+
     /* prefix */
     flb_sds_t logstash_prefix;
 

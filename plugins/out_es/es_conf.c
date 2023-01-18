@@ -449,7 +449,17 @@ struct flb_elasticsearch *flb_es_conf_create(struct flb_output_instance *ins,
         }
     }
 #endif
-
+    
+    ctx->i_skip_retry_on_error_count = 0;
+    buf = flb_sds_create(ctx->skip_retry_on_error_statuses);
+    tmp = strtok(buf, ",");
+    while (tmp != NULL && ctx->i_skip_retry_on_error_count < _countof(ctx->i_skip_retry_on_error_statuses))
+    {
+        ctx->i_skip_retry_on_error_statuses[ctx->i_skip_retry_on_error_count++] = strtol(tmp, NULL, 10);
+        tmp = strtok(NULL, ",");
+    }
+    flb_sds_destroy(buf);
+    
     return ctx;
 }
 
