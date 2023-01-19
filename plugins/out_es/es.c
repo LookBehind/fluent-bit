@@ -780,7 +780,7 @@ static int elasticsearch_error_check(struct flb_elasticsearch *ctx,
                             if (item_val.via.i64 == ctx->i_skip_retry_on_error_statuses[m])
                             {
                                 check = ERROR_CHK_NONRETRYABLE_ERRORS;
-                                goto done;
+                                break;
                             }
 
                             if (m == ctx->i_skip_retry_on_error_count - 1)
