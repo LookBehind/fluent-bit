@@ -35,7 +35,6 @@ static inline int flb_output_plugin_log_suppress_check(struct flb_output_instanc
     size_t size;
     va_list args;
     char buf[4096];
-    flb_sds_t overflow = NULL;
     struct flb_worker *w;
 
     if (ins->log_suppress_interval <= 0) {
@@ -47,27 +46,15 @@ static inline int flb_output_plugin_log_suppress_check(struct flb_output_instanc
     va_end(args);
 
     if (size == -1) {
-        overflow = flb_sds_create_size(8192);
-        if(overflow == NULL) {
-            return FLB_FALSE;
-        }
-        va_start(args, fmt);
-        flb_sds_printf(&overflow, fmt, args);
-        va_end(args);
-
-        size = flb_sds_len(overflow);
+        return FLB_FALSE;
     }
 
     w = flb_worker_get();
     if (!w) {
-        flb_sds_destroy(overflow);
         return FLB_FALSE;
     }
 
-    ret = flb_log_cache_check_suppress(w->log_cache, overflow != NULL ? overflow : buf, size);
-    
-    flb_sds_destroy(overflow);
-
+    ret = flb_log_cache_check_suppress(w->log_cache, buf, size);
     return ret;
 }
 
