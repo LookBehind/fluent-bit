@@ -44,16 +44,17 @@ static inline int flb_output_plugin_log_suppress_check(struct flb_output_instanc
 
     va_start(args, fmt);
     size = vsnprintf(buf, sizeof(buf) - 1, fmt, args);
+    va_end(args);
 
     if (size == -1) {
         overflow = flb_sds_create_size(8192);
         if(overflow == NULL) {
-            va_end(args);
             return FLB_FALSE;
         }
+        va_start(args, fmt);
         flb_sds_printf(&overflow, fmt, args);
         va_end(args);
-        
+
         size = flb_sds_len(overflow);
     }
 
